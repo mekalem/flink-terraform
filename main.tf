@@ -111,8 +111,11 @@ resource "kubernetes_service_v1" "flink_oauth_proxy" {
   }
 }
 
-resource "kubernetes_manifest" "flink_deployment" {
-  manifest = {
+# -----------------------------------------------------------------------------
+# NEW: Session Cluster (replaces the old FlinkDeployment)
+# -----------------------------------------------------------------------------
+resource "kubernetes_manifest" "flink_session_cluster" {
+manifest = {
     apiVersion = "flink.apache.org/v1beta1"
     kind       = "FlinkDeployment"
     metadata = {
@@ -144,76 +147,8 @@ resource "kubernetes_manifest" "flink_deployment" {
           cpu    = 1
         }
       }
-      job = {
-        jarURI      = "local:///opt/flink/examples/streaming/StateMachineExample.jar"
-        parallelism = 2
-        upgradeMode = "stateless"
-        args = [
-          # "--maxLoadPerTask=1;2;4;8;16;\n16;8;4;2;1\n8;4;16;1;2",
-          "--repeatsAfterMinutes=60"
-        ]
-      }
     }
   }
-  wait {
-    fields = {
-      "status.jobManagerDeploymentStatus" = "READY"
-    }
-  }
-}
- 
-# Add this new one for customer-analytics
-resource "kubernetes_manifest" "customer_analytics_deployment" {
-  manifest = {
-    apiVersion = "flink.apache.org/v1beta1"
-    kind       = "FlinkDeployment"
-    metadata = {
-      name      = "customer-analytics"
-      namespace = "sasktel-data-team-flink"
-    }
-    spec = {
-      # Use the Harbor image variable
-      # image        = var.customer_analytics_image 
-      image        = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest" 
-      flinkVersion = "v1_16"
-      
-      flinkConfiguration = {
-        "taskmanager.numberOfTaskSlots"              = "20"
-        "job.autoscaler.enabled"                     = "true"
-        "job.autoscaler.stabilization.interval"      = "1m"
-        "job.autoscaler.metrics.window"              = "15m"
-        "job.autoscaler.utilization.target"          = "0.5"
-        "job.autoscaler.target.utilization.boundary" = "0.3"
-        "pipeline.max-parallelism"                   = "32"
-      }
-      
-      serviceAccount = "flink"
-      
-      jobManager = {
-        resource = {
-          memory = "2048m"
-          cpu    = 1
-        }
-      }
-      
-      taskManager = {
-        resource = {
-          memory = "2048m"
-          cpu    = 1
-        }
-      }
-      
-      job = {
-        # Point to the JAR in the proper location
-        # jarURI      = "local:///opt/flink/usrlib/customer-analytics.jar"
-        jarURI      = "local:///opt/flink/examples/streaming/customer-analytics-1.0.jar"
-        parallelism = 2
-        upgradeMode = "stateless"
-        state       = "running"
-      }
-    }
-  }
-  
   wait {
     fields = {
       "status.jobManagerDeploymentStatus" = "READY"
@@ -221,19 +156,78 @@ resource "kubernetes_manifest" "customer_analytics_deployment" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Job 1: State Machine Example (same as your current job)
+# -----------------------------------------------------------------------------
+resource "kubernetes_manifest" "state_machine_job" {
+  # depends_on = [kubernetes_manifest.flink_session_cluster]
+  
+  manifest = {
+    apiVersion = "flink.apache.org/v1beta1"
+    kind       = "FlinkSessionJob"
+    metadata = {
+      name      = "state-machine-job"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      deploymentName = "data-team-flink"  # Reference the session cluster
+      
+      job = {
+        # Same JAR and config as your working application mode job
+        jarURI      = "local:///opt/flink/examples/streaming/StateMachineExample.jar"
+        parallelism = 2
+        upgradeMode = "stateless"
+        state       = "running"
+        args = [
+          "--repeatsAfterMinutes=60"
+        ]
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Job 2: Word Count Example (additional job)
+# -----------------------------------------------------------------------------
+resource "kubernetes_manifest" "word_count_job" {
+  # depends_on = [kubernetes_manifest.flink_session_cluster]
+  
+  manifest = {
+    apiVersion = "flink.apache.org/v1beta1"
+    kind       = "FlinkSessionJob"
+    metadata = {
+      name      = "word-count-job"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      deploymentName = "data-team-flink"  # Reference the same session cluster
+      
+      job = {
+        # Another built-in example JAR
+        jarURI      = "local:///opt/flink/examples/streaming/WordCount.jar"
+        parallelism = 1
+        upgradeMode = "stateless"
+        state       = "running"
+        args = [
+          "--input", "lorem ipsum dolor sit amet consectetur adipiscing elit"
+        ]
+      }
+    }
+  }
+}
 
 resource "kubernetes_manifest" "flink_route_kafka_diameter_gy" {
   manifest = {
     apiVersion = "route.openshift.io/v1"
     kind       = "Route"
     metadata = {
-      name      = "customer-analytics-rest"
+      name      = "data-team-flink-rest"
       namespace = "sasktel-data-team-flink"
     }
     spec = {
       to = {
         kind = "Service"
-        name = "customer-analytics-rest"
+        name = "data-team-flink-rest"
       }
       port = {
         targetPort = 8081
