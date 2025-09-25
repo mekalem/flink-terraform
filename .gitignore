@@ -1,0 +1,27 @@
+.env
+.env.*
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+.terraform.lock.hcl
+*.tfvars
+*.tfvars.json
+*.log
+*.jar
+*.class
+target/
+build/
+.gradle/
+.idea/
+.vscode/
+.DS_Store
+node_modules/
+# Maven / IntelliJ
+*.iml
+out/
+# Docker
+docker-compose.override.yml
+# Ignore local secrets
+secrets.yml
+# Ignore any IDE-specific workspace
+*.swp
