@@ -111,6 +111,11 @@ resource "kubernetes_service_v1" "flink_oauth_proxy" {
   }
 }
 
+locals {
+  # Construct the full image URL
+  full_image_url = "${var.harbor_registry}/${var.harbor_project}/${var.image_name}:${var.image_tag}"
+}
+
 # Session Cluster 
 resource "kubernetes_manifest" "flink_session_cluster" {
   manifest = {
@@ -121,9 +126,9 @@ resource "kubernetes_manifest" "flink_session_cluster" {
       namespace = "sasktel-data-team-flink"
     }
     spec = {
-      image        = "flink:1.16"
+      # image        = "flink:1.16"
       # image        = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest" 
-
+      image        = local.full_image_url 
       flinkVersion = "v1_16"
       # mode         = "standalone"  # This is the important to stop dynamic resource allocation, `native` default
       flinkConfiguration = {
@@ -153,9 +158,115 @@ resource "kubernetes_manifest" "flink_session_cluster" {
 }
 
 
-# Job 2: Word Count Example (additional job)
-resource "kubernetes_manifest" "top-speed-windowing" {
-  # depends_on = [kubernetes_manifest.flink_session_cluster]
+
+# Option 4: If you need to use your custom JAR immediately,
+# create a simple HTTPS server (most practical short-term solution)
+resource "kubernetes_manifest" "custom_jar_https_server" {
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata = {
+      name      = "custom-jar-server"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      replicas = 1
+      selector = {
+        matchLabels = {
+          app = "custom-jar-server"
+        }
+      }
+      template = {
+        metadata = {
+          labels = {
+            app = "custom-jar-server"
+          }
+        }
+        spec = {
+          initContainers = [{
+            name  = "extract-custom-jars"
+            # image = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest"
+            image        = local.full_image_url 
+            command = ["sh", "-c"]
+            args = ["find /opt/flink -name '*.jar' -exec cp {} /shared/ \\;"]
+            volumeMounts = [{
+              name      = "jar-storage"
+              mountPath = "/shared"
+            }]
+          }]
+          containers = [{
+            name  = "python-https-server"
+            image = "python:3.9-alpine"
+            command = ["python", "-m", "http.server", "8443"]
+            workingDir = "/shared"
+            ports = [{
+              containerPort = 8443
+            }]
+            volumeMounts = [{
+              name      = "jar-storage"
+              mountPath = "/shared"
+            }]
+          }]
+          volumes = [{
+            name = "jar-storage"
+            emptyDir = {}
+          }]
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_manifest" "custom_jar_server_service" {
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata = {
+      name      = "custom-jar-server"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      selector = {
+        app = "custom-jar-server"
+      }
+      ports = [{
+        port       = 8443
+        targetPort = 8443
+      }]
+    }
+  }
+}
+
+# Use your custom JAR via the HTTPS server
+resource "kubernetes_manifest" "custom_analytics_job" {
+  depends_on = [kubernetes_manifest.custom_jar_https_server]
+  
+  manifest = {
+    apiVersion = "flink.apache.org/v1beta1"
+    kind       = "FlinkSessionJob"
+    metadata = {
+      name      = "custom-analytics-job"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      deploymentName = "data-team-flink"
+      
+      job = {
+        # Access your custom JAR via HTTP (internal cluster traffic)
+        jarURI      = "http://custom-jar-server.sasktel-data-team-flink.svc.cluster.local:8443/customer-analytics-1.0.jar"
+        parallelism = 1
+        upgradeMode = "stateless"
+        state       = "running"
+        args = [
+          # Add your custom job arguments
+        ]
+      }
+    }
+  }
+}
+# Job 2: Top Speed Windowing Example
+resource "kubernetes_manifest" "top_speed_windowing_job" {
+  depends_on = [kubernetes_manifest.custom_jar_https_server]
   
   manifest = {
     apiVersion = "flink.apache.org/v1beta1"
@@ -165,40 +276,12 @@ resource "kubernetes_manifest" "top-speed-windowing" {
       namespace = "sasktel-data-team-flink"
     }
     spec = {
-      deploymentName = "data-team-flink"  # Reference the same session cluster
-      
-      job = {
-        # Another built-in example JAR
-        # jarURI      = "/opt/flink/examples/streaming/WordCount.jar"
-        # jarURI      = "local:///opt/flink/examples/streaming/customer-analytics-1.0.jar"
-        # jarURI      = "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming/2.1.0/flink-examples-streaming-2.1.0-WordCount.jar"
-        jarURI      =  "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.3/flink-examples-streaming_2.12-1.15.3-TopSpeedWindowing.jar"
-        parallelism = 4
-        upgradeMode = "stateless"
-        state       = "running"
-        # args = [
-        #   "--repeatsAfterMinutes=60"
-        # ]
-      }
-    }
-  }
-}
-
-# Job 3:  State Machine Example
-resource "kubernetes_manifest" "session_windowing_job" {
-  manifest = {
-    apiVersion = "flink.apache.org/v1beta1"
-    kind       = "FlinkSessionJob"
-    metadata = {
-      name      = "session-windowing-job"
-      namespace = "sasktel-data-team-flink"
-    }
-    spec = {
       deploymentName = "data-team-flink"
       
       job = {
-        jarURI      =  "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.3/flink-examples-streaming_2.12-1.15.3-TopSpeedWindowing.jar"
-        parallelism = 2
+        # Change only the JAR filename at the end of the URL
+        jarURI      = "http://custom-jar-server.sasktel-data-team-flink.svc.cluster.local:8443/TopSpeedWindowing.jar"
+        parallelism = 4
         upgradeMode = "stateless"
         state       = "running"
       }

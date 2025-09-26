@@ -1,3 +1,5 @@
+# variables.tf - Variable declarations with types and descriptions
+
 variable "namespace" {
   description = "Kubernetes namespace for Flink"
   type        = string
@@ -48,3 +50,14 @@ variable "ml_inference_image" {
   type        = string  
   default     = "flink:1.16"
 } 
+
+variable "image_name" {
+  description = "Container image name"
+  type        = string
+}
+
+variable "image_tag" {
+  description = "Container image tag"
+  type        = string
+  default     = "latest"
+}

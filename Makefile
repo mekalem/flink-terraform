@@ -31,7 +31,8 @@ list-jobs: ## List all available jobs
 	@ls -d jobs/*/ | grep -v common | xargs -n 1 basename
 
 deploy-dev: ## Deploy to development environment (root main.tf)
-	@terraform apply
+# 	@terraform apply
+	@./deployment/scripts/deploy.sh
 
 deploy-dev-infra: ## Deploy to development environment (infrastructure setup)
 	@cd infrastructure && terraform apply -var-file="environments/dev.tfvars"

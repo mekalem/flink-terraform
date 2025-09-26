@@ -133,6 +133,7 @@ make deploy-dev
 chmod +x deployment/scripts/create-job.sh
 chmod +x deployment/scripts/build-and-deploy.sh
 chmod +x deployment/scripts/update-job.sh
+chmod +x deployment/scripts/deploy.sh
 ```
 
 
@@ -578,3 +579,93 @@ Terraform creates: A Kubernetes FlinkDeployment named data-team-flink
 FlinkSessionJob references: deploymentName = "data-team-flink" (the Kubernetes name, not the Terraform resource name)
 
 This is exactly right. The FlinkSessionJob's deploymentName field must match the metadata.name of the session cluster, which is data-team-flink
+
+
+The download of the jar happens in flink-kubernetes-operator pod. So, when you apply FlinkSessionJob, the fink-operator would recognize the Crd and will try to download the jar from jarUri location and construct a JobGraph and submit the sessionJob to JobDeployment. Flink Kubernetes Operator will also have flink running inside it to build a JobGraph. So, You will have to add flink-s3-fs-hadoop-1.15.3.jar in location /opt/flink/plugins/s3-fs-hadoop/ inside flink-kubernetes-operator
+
+You can add the jar either by extending the ghcr.io/apache/flink-kubernetes-operator image, curl the jar and copy it to plugins location
+
+or
+
+You can write an initContainer which will download the jar to a volume and mount that volume
+
+
+Why local:// worked in Application Mode but not Session Mode:
+Application Mode:
+
+The JAR path local:///opt/... is accessed from within the same pod where the job runs
+Your custom image contains the JAR, so local:// can find it directly
+
+Session Mode:
+
+The JAR path is accessed by the Flink Operator pod (separate from your session cluster)
+The operator pod doesn't have your custom image, so it can't find local:///opt/...
+The operator downloads the JAR and then submits it to your session cluster
+
+The Volume Approach Won't Work Because:
+Even if you mount volumes in your session cluster pods, the operator pod still can't access those volumes. The operator and session cluster are completely separate deployments.
+Your Options (in order of complexity):
+1. HTTP Server (Recommended - what we already discussed)
+
+Simple, works with any JAR
+No operator modifications needed
+
+2. Shared Volume Between Operator AND Session Cluster
+This is possible but complex - you'd need to:
+
+Create a PersistentVolume that both the operator and session cluster can access
+Modify the operator deployment to mount this volume
+This requires cluster admin access and is not standard
+
+3. Extend the Operator Image
+dockerfileFROM ghcr.io/apache/flink-kubernetes-operator
+COPY your-custom.jar /opt/flink/lib/
+Then deploy your custom operator image.
+4. Use a File Server/NFS
+Mount the same NFS volume in both operator and session cluster.
+
+
+Most production Flink deployments either:
+
+Use HTTP/HTTPS artifact servers (most common)
+Build JARs into custom Flink images for application mode
+Use object storage with proper operator extensions
+
+Bottom line: You cannot directly reference /opt/flink/examples/streaming/StateMachineExample.jar via HTTPS from Harbor. You need to either extract it to a web server (option 1) or use external HTTPS sources (option maven)
+
+
+Better Long-Term Alternatives:
+1. Harbor Integration (Best for your setup)
+Since you already have Harbor, integrate JAR serving directly:
+
+Upload JARs as artifacts to Harbor (if supported)
+Use Harbor's API/webhooks to serve JARs
+Leverage your existing authentication/security
+
+2. Application Mode for Production
+
+Use session mode for development/testing
+Switch to application mode for production jobs
+Each job gets its own dedicated cluster with JAR built-in
+
+3. Operator Extension (Enterprise solution)
+
+Extend the Flink operator with custom JAR resolution
+Integrate with your CI/CD pipeline
+Most complex but most native solution
+
+My Recommendation:
+Short-term (3-6 months): Use your current HTTP server solution - it works and is proven
+Medium-term (6-12 months): Investigate Harbor JAR serving or move production jobs to application mode
+Long-term (1+ years): Consider operator extensions if you have many custom JARs
+Your current solution is a solid bridge that many companies use in production. It's not perfect, but it's pragmatic and maintainable while you evaluate more sophisticated approaches.
+
+## To access other JARs from your custom image 
+
+(like TopSpeedWindowing), you need to change the jarURI to point to the correct JAR file served by your HTTP server.
+Since your init container copies all JARs with this command:
+``` bash
+find /opt/flink -name '*.jar' -exec cp {} /shared/ \;
+```
+All JAR files from your custom image are now available via the HTTP server. You just need to reference the correct filename:
+
