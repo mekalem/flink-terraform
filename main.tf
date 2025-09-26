@@ -111,11 +111,9 @@ resource "kubernetes_service_v1" "flink_oauth_proxy" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# NEW: Session Cluster (replaces the old FlinkDeployment)
-# -----------------------------------------------------------------------------
+# Session Cluster 
 resource "kubernetes_manifest" "flink_session_cluster" {
-manifest = {
+  manifest = {
     apiVersion = "flink.apache.org/v1beta1"
     kind       = "FlinkDeployment"
     metadata = {
@@ -124,15 +122,12 @@ manifest = {
     }
     spec = {
       image        = "flink:1.16"
+      # image        = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest" 
+
       flinkVersion = "v1_16"
+      # mode         = "standalone"  # This is the important to stop dynamic resource allocation, `native` default
       flinkConfiguration = {
-        "taskmanager.numberOfTaskSlots"              = "20"
-        "job.autoscaler.enabled"                     = "true"
-        "job.autoscaler.stabilization.interval"      = "1m"
-        "job.autoscaler.metrics.window"              = "15m"
-        "job.autoscaler.utilization.target"          = "0.5"
-        "job.autoscaler.target.utilization.boundary" = "0.3"
-        "pipeline.max-parallelism"                   = "32"
+        "taskmanager.numberOfTaskSlots" = "20"
       }
       serviceAccount = "flink"
       jobManager = {
@@ -142,6 +137,7 @@ manifest = {
         }
       }
       taskManager = {
+        replicas = 1  # This should force TaskManager creation
         resource = {
           memory = "2048m"
           cpu    = 1
@@ -156,47 +152,16 @@ manifest = {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Job 1: State Machine Example (same as your current job)
-# -----------------------------------------------------------------------------
-resource "kubernetes_manifest" "state_machine_job" {
-  # depends_on = [kubernetes_manifest.flink_session_cluster]
-  
-  manifest = {
-    apiVersion = "flink.apache.org/v1beta1"
-    kind       = "FlinkSessionJob"
-    metadata = {
-      name      = "state-machine-job"
-      namespace = "sasktel-data-team-flink"
-    }
-    spec = {
-      deploymentName = "data-team-flink"  # Reference the session cluster
-      
-      job = {
-        # Same JAR and config as your working application mode job
-        jarURI      = "local:///opt/flink/examples/streaming/StateMachineExample.jar"
-        parallelism = 2
-        upgradeMode = "stateless"
-        state       = "running"
-        args = [
-          "--repeatsAfterMinutes=60"
-        ]
-      }
-    }
-  }
-}
 
-# -----------------------------------------------------------------------------
 # Job 2: Word Count Example (additional job)
-# -----------------------------------------------------------------------------
-resource "kubernetes_manifest" "word_count_job" {
+resource "kubernetes_manifest" "top-speed-windowing" {
   # depends_on = [kubernetes_manifest.flink_session_cluster]
   
   manifest = {
     apiVersion = "flink.apache.org/v1beta1"
     kind       = "FlinkSessionJob"
     metadata = {
-      name      = "word-count-job"
+      name      = "top-speed-windowing"
       namespace = "sasktel-data-team-flink"
     }
     spec = {
@@ -204,13 +169,38 @@ resource "kubernetes_manifest" "word_count_job" {
       
       job = {
         # Another built-in example JAR
-        jarURI      = "local:///opt/flink/examples/streaming/WordCount.jar"
-        parallelism = 1
+        # jarURI      = "/opt/flink/examples/streaming/WordCount.jar"
+        # jarURI      = "local:///opt/flink/examples/streaming/customer-analytics-1.0.jar"
+        # jarURI      = "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming/2.1.0/flink-examples-streaming-2.1.0-WordCount.jar"
+        jarURI      =  "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.3/flink-examples-streaming_2.12-1.15.3-TopSpeedWindowing.jar"
+        parallelism = 4
         upgradeMode = "stateless"
         state       = "running"
-        args = [
-          "--input", "lorem ipsum dolor sit amet consectetur adipiscing elit"
-        ]
+        # args = [
+        #   "--repeatsAfterMinutes=60"
+        # ]
+      }
+    }
+  }
+}
+
+# Job 3:  State Machine Example
+resource "kubernetes_manifest" "session_windowing_job" {
+  manifest = {
+    apiVersion = "flink.apache.org/v1beta1"
+    kind       = "FlinkSessionJob"
+    metadata = {
+      name      = "session-windowing-job"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      deploymentName = "data-team-flink"
+      
+      job = {
+        jarURI      =  "https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.3/flink-examples-streaming_2.12-1.15.3-TopSpeedWindowing.jar"
+        parallelism = 2
+        upgradeMode = "stateless"
+        state       = "running"
       }
     }
   }

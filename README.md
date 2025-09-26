@@ -400,3 +400,181 @@ project-root/
     ├── dev.tfvars                 # ⚙️ Dev values
     ├── qa.tfvars                  # ⚙️ QA values  
     └── prod.tfvars                # ⚙️ Prod values
+
+
+When Debugging Jobs not running in Session mode
+- don't see task manager or slots listed (this is fine, it happens and doens't show anything if no streaming job / job is utilizing taskmanager)
+1. Check the Session Cluster Status First
+Before jobs can run, the session cluster needs to be ready:
+``` bash
+
+kubectl get flinkdeployment data-team-flink -n sasktel-data-team-flink
+```
+Make sure the jobManagerDeploymentStatus is READY (which your Terraform waits for).
+If its shows `deployed` its not the same, cause job manager has conditions
+``` hcl
+  wait {
+    fields = {
+      "status.jobManagerDeploymentStatus" = "READY"
+    }
+  }
+```
+
+In that case, lets run deeper debug
+``` bash
+kubectl describe flinkdeployment data-team-flink -n sasktel-data-team-flink
+```
+check for `  Job Manager Deployment Status:  DEPLOYING`
+The jobManagerDeploymentStatus is showing DEPLOYING instead of READY. This means your session cluster isn't fully started yet, which is why your session jobs aren't running.
+
+wait for it to be `Job Manager Deployment Status:  READY`
+
+Let's check what's happening with the actual pods:
+``` bash
+kubectl get pods -n sasktel-data-team-flink
+```
+
+If the session cluster is READY and the JobManager pod is running. Let's check if your session jobs are running:
+``` bash
+kubectl get flinksessionjob -n sasktel-data-team-flink
+``` bash
+sasktel-data-team-flink
+NAME                JOB STATUS   LIFECYCLE STATE
+state-machine-job                UPGRADING
+word-count-job                   UPGRADING
+
+```
+This should show you the status of your two jobs
+
+If session cluster is ready but if the session jobs aren't showing up or aren't running, we can describe them to see what's happening:
+``` bash
+kubectl describe flinksessionjob state-machine-job -n sasktel-data-team-flink
+kubectl describe flinksessionjob word-count-job -n sasktel-data-team-flink
+```
+
+For example: one issue was 
+`Could not find a file system implementation for scheme 'local'. The scheme is not directly supported by Flink and no Hadoop file system to support this scheme could be loaded. For a full list of supported file systems, please see https://nightlies.apache.org/flink/flink-docs-stable/ops/filesystems/. -> Hadoop is not in the classpath/dependencies.`
+
+local:// is not supported in this Flink setup. The error message clearly states that Flink can't find a file system implementation for the 'local' scheme.
+
+First, let's see what's in the Flink examples directory:
+``` bash
+kubectl exec -it data-team-flink-86f7769d46-qm55h -n sasktel-data-team-flink -- ls -la /opt/flink/examples/
+```
+
+or get inside jobmanager container 
+``` bash
+kubectl exec -it data-team-flink-86f7769d46-qm55h -n sasktel-data-team-flink -- bash
+```
+
+so I upgraded Terraform to use regular file paths instead of local://:
+
+But if there still an issu with the path not found check if the path is accessable in general 
+``` bash
+kubectl exec -it data-team-flink-86f7769d46-qm55h -n sasktel-data-team-flink -- find /opt/flink -name "*.jar" | grep -i example
+```
+Then
+Let's verify the JAR is accessible from within the pod:
+``` bash
+kubectl exec -it data-team-flink-86f7769d46-qm55h -n sasktel-data-team-flink -- ls -la /opt/flink/examples/streaming/StateMachineExample.jar
+```
+
+if it shows something like 
+``` bash
+-rw-r--r--. 1 flink flink 5427101 Nov 13  2023 /opt/flink/examples/streaming/StateMachineExample.jar
+``` 
+access is working
+
+TRy
+1. Delete the stuck session jobs and recreate them:
+``` bash
+kubectl delete flinksessionjob state-machine-job word-count-job -n sasktel-data-team-flink
+```
+2. then recreate
+``` bash
+terraform apply
+```
+
+1. Check if there are multiple pods or if the pod changed:
+bashkubectl get pods -n sasktel-data-team-flink
+2. Let's check the JAR from the current pod again:
+bash# Get the current pod name
+JOBMANAGER_POD=$(kubectl get pods -n sasktel-data-team-flink -l component=jobmanager -o jsonpath='{.items[0].metadata.name}')
+echo "Checking pod: $JOBMANAGER_POD"
+
+# Check if the JAR exists
+kubectl exec -it $JOBMANAGER_POD -n sasktel-data-team-flink -- ls -la /opt/flink/examples/streaming/WordCount.jar
+3. Check TaskManager pod as well:
+bash# Check if there's a TaskManager pod
+kubectl get pods -n sasktel-data-team-flink -l component=taskmanager
+
+Issue might be no taskmanager pod running
+``` bash
+ kubectl get pods -n sasktel-data-team-flink
+NAME                                 READY   STATUS    RESTARTS   AGE
+data-team-flink-86f7769d46-qm55h     1/1     Running   0          55m
+flink-oauth-proxy-5448fdfdb4-s5kdf   1/1     Running   0          61m
+```
+we sohuld see one more.
+1. Check why TaskManager isn't starting:
+``` bash
+kubectl describe flinkdeployment data-team-flink -n sasktel-data-team-flink
+```
+check for any TaskManage related errors
+
+2. Check for any TaskManager-related events or failed deployments:
+
+``` bash
+kubectl get events -n sasktel-data-team-flink --sort-by='.lastTimestamp' | tail -20
+```
+
+3. Check if there are any ReplicaSets or Deployments for TaskManager:
+``` bash
+kubectl get deployments,replicasets -n sasktel-data-team-flink
+```
+
+atm The FlinkDeployment shows TaskManager: Replicas: 1 in the spec, but there's no TaskManager pod running, and there's no TaskManager deployment or replicaset. This is unusual - normally in session mode, TaskManagers should start automatically.
+
+Delete Existing session cluster
+```bash
+kubectl delete flinkdeployment data-team-flink -n sasktel-data-team-flink
+```
+
+
+## SEE NOTES
+Warning  Error   4m34s (x13 over 18m)  Job   /opt/flink/examples/streaming/WordCount.jar (No such file or directory)
+ok so lets leave it in default mode which is native and i think i know issues, whe i describe the jobs, i see this issue, so both local:///opt or /opt don't work in session moe but local worked in application mode, what is the issue this doesn;t work even though ive cheked with bash the jobmanager has this file and can acccess it?You've identified the key issue! The difference between application mode and session mode is crucial here:
+
+In Application Mode: The JAR file is accessible because it's part of the same pod where the job runs.
+In Session Mode: The FlinkSessionJob needs to submit the JAR to the session cluster, but the way JAR files are handled is different. The session cluster JobManager needs to be able to access the JAR file to distribute it to TaskManagers.
+
+
+In FlinkSessionJob, the jarURI can contain remote sources and leverages the Flink filesystem mechanism to download the JAR and submit to the session cluster. The download of the JAR happens in the flink-kubernetes-operator pod ApacheStack Overflow. The operator will upload the user JAR first and then call the JobManager to build the JobGraph FLIP-215: Introduce FlinkSessionJob CRD in the kubernetes operator - Apache Flink - Apache Software Foundation.
+The Problem: In session mode, the Flink Operator needs to download/access the JAR file to upload it to the session cluster, not the session cluster pods themselves. The operator pod doesn't have access to the local JAR files in your session cluster pods.
+
+
+Option 1: Use HTTP URLs for JAR files (Easiest)
+Option 2: Build Custom Image with JAR
+Option 3: Use File Server/Object Storage
+
+
+# Delete the deployment (this will remove the pod)
+kubectl delete deployment jar-server -n sasktel-data-team-flink
+
+# Also delete the service
+kubectl delete service jar-server -n sasktel-data-team-flink
+
+# Or if you used Terraform, remove those resources from your .tf file and run:
+terraform apply
+
+The difference between those two names is:
+
+resource "kubernetes_manifest" "flink_session_cluster" - This is the Terraform resource name. It's just an identifier within your Terraform configuration so you can reference this resource elsewhere (like in depends_on).
+name = "data-team-flink" - This is the actual Kubernetes resource name that gets created in the cluster. This is what other Kubernetes resources will reference.
+
+Your configuration will work perfectly! Here's what happens:
+
+Terraform creates: A Kubernetes FlinkDeployment named data-team-flink
+FlinkSessionJob references: deploymentName = "data-team-flink" (the Kubernetes name, not the Terraform resource name)
+
+This is exactly right. The FlinkSessionJob's deploymentName field must match the metadata.name of the session cluster, which is data-team-flink
