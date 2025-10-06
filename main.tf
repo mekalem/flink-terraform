@@ -127,7 +127,6 @@ resource "kubernetes_manifest" "flink_session_cluster" {
     }
     spec = {
       # image        = "flink:1.16"
-      # image        = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest" 
       image        = local.full_image_url 
       flinkVersion = "v1_16"
       # mode         = "standalone"  # This is the important to stop dynamic resource allocation, `native` default
@@ -185,7 +184,6 @@ resource "kubernetes_manifest" "custom_jar_https_server" {
         spec = {
           initContainers = [{
             name  = "extract-custom-jars"
-            # image = "container-registry.stholdco.com/technology-data-team/customer-analytics:latest"
             image        = local.full_image_url 
             command = ["sh", "-c"]
             args = ["find /opt/flink -name '*.jar' -exec cp {} /shared/ \\;"]
@@ -289,6 +287,7 @@ resource "kubernetes_manifest" "top_speed_windowing_job" {
   }
 }
 
+
 resource "kubernetes_manifest" "flink_route_kafka_diameter_gy" {
   manifest = {
     apiVersion = "route.openshift.io/v1"
@@ -304,6 +303,128 @@ resource "kubernetes_manifest" "flink_route_kafka_diameter_gy" {
       }
       port = {
         targetPort = 8081
+      }
+      tls = {
+        termination = "edge"
+      }
+    }
+  }
+}
+
+resource "kubernetes_manifest" "ml_model_server" {
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata = {
+      name      = "ml-model-server"
+      namespace = "sasktel-data-team-flink"
+      labels = {
+        app = "ml-model-server"
+      }
+    }
+    spec = {
+      replicas = 2
+      selector = {
+        matchLabels = {
+          app = "ml-model-server"
+        }
+      }
+      template = {
+        metadata = {
+          labels = {
+            app = "ml-model-server"
+          }
+        }
+        spec = {
+          containers = [{
+            name  = "model-server"
+            image = "${var.harbor_registry}/${var.harbor_project}/ml-model-server:latest"
+            imagePullPolicy = "Always"
+            
+            ports = [{
+              containerPort = 8000
+              name          = "http"
+            }]
+            
+            # No volume mounts needed - model is in the image
+            
+            resources = {
+              requests = {
+                memory = "2Gi"
+                cpu    = "1"
+              }
+              limits = {
+                memory = "4Gi"
+                cpu    = "2"
+              }
+            }
+            
+            livenessProbe = {
+              httpGet = {
+                path = "/health"
+                port = 8000
+              }
+              initialDelaySeconds = 60
+              periodSeconds       = 30
+              timeoutSeconds      = 5
+              failureThreshold    = 3
+            }
+            
+            readinessProbe = {
+              httpGet = {
+                path = "/ready"
+                port = 8000
+              }
+              initialDelaySeconds = 30
+              periodSeconds       = 10
+              timeoutSeconds      = 5
+              failureThreshold    = 3
+            }
+          }]
+        }
+      }
+    }
+  }
+}
+
+# Service for model server
+resource "kubernetes_manifest" "ml_model_server_service" {
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata = {
+      name      = "ml-model-server"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      selector = {
+        app = "ml-model-server"
+      }
+      ports = [{
+        port       = 8000
+        targetPort = 8000
+        name       = "http"
+      }]
+      type = "ClusterIP"
+    }
+  }
+}
+
+resource "kubernetes_manifest" "ml_model_server_route" {
+  manifest = {
+    apiVersion = "route.openshift.io/v1"
+    kind       = "Route"
+    metadata = {
+      name      = "ml-model-server"
+      namespace = "sasktel-data-team-flink"
+    }
+    spec = {
+      to = {
+        kind = "Service"
+        name = "ml-model-server"
+      }
+      port = {
+        targetPort = 8000
       }
       tls = {
         termination = "edge"

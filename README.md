@@ -1,3 +1,13 @@
+To Run 
+``` bash
+terraform apply
+```
+BUT we need to pass custom var so we do this with the script 
+``` bash
+make dev-deploy
+```
+
+
 ## File Structure
 flink-data-platform/
 ├── infrastructure/
@@ -669,3 +679,345 @@ find /opt/flink -name '*.jar' -exec cp {} /shared/ \;
 ```
 All JAR files from your custom image are now available via the HTTP server. You just need to reference the correct filename:
 
+
+
+# High Level Model Architecture
+┌─────────────────┐
+│ Data Generator  │ → Kafka Topic (npl_input_stream)
+│    (Pod)        │
+└─────────────────┘
+         ↓
+┌─────────────────┐
+│  Flink ML Job   │ ← calls → ┌──────────────────┐
+│    (FlinkDep)   │           │  Model Server    │
+└─────────────────┘           │     (Pod)        │
+         ↓                    └──────────────────┘
+   Kafka Topic                        ↓
+(ml_predictions)              ┌──────────────────┐
+                              │  Model Storage   │
+                              │  (PVC or S3)     │
+                              └──────────────────┘
+
+# Process to get inferencing model up and running
+# Check for S3-compatible storage classes
+oc get storageclass | grep -i s3
+
+# Check what PVC storage classes you have
+oc get storageclass
+
+If you don't have S3, use a PVC - it's simpler and works fine for a single model.
+
+Storage class command gives us 
+NAME                              PROVISIONER                  RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+dell-powerstore-block (default)   csi-powerstore.dellemc.com   Delete          WaitForFirstConsumer   true                   55d
+dell-powerstore-nfs               csi-powerstore.dellemc.com   Delete          WaitForFirstConsumer   true                   5
+
+This shows your OpenShift cluster has Dell PowerStore storage available with two storage classes:
+
+dell-powerstore-block (default) - Block storage
+dell-powerstore-nfs - NFS storage
+
+Key details:
+
+(default) means if you don't specify a storageClassName in your PVC, it'll use dell-powerstore-block
+RECLAIMPOLICY: Delete - When you delete the PVC, the underlying storage is also deleted
+WaitForFirstConsumer - Volume won't be created until a pod using it is scheduled
+ALLOWVOLUMEEXPANSION: true - You can resize the PVC later if needed
+
+Three Different Images
+
+Flink Job Image (Java)
+
+Based on flink:1.18 image
+Contains your ML job JAR
+This is what you're already doing with your other jobs
+
+
+Model Server Image (Python) - SEPARATE
+
+Based on python:3.10 image
+Contains main.py + requirements.txt
+NOT related to Flink at all
+Just a Python FastAPI web server
+
+
+Data Generator Image (Python) - SEPARATE
+
+Based on python:3.9 image
+Contains nplGenerator.py + requirements
+Also NOT related to Flink
+Just produces messages to Kafka
+
+
+
+Why Separate?
+The model server and data generator are standalone Python applications that run as regular pods. They're not Flink jobs. They don't need Flink.
+Think of it like this:
+┌─────────────────────┐
+│   Flink Cluster     │ ← Your existing setup with JAR files
+│   (Java Jobs)       │
+└─────────────────────┘
+         ↓ HTTP calls
+┌─────────────────────┐
+│  Model Server Pod   │ ← Separate Python pod (NOT Flink)
+│  (Python/FastAPI)   │ ← Built from services/model-server/
+└─────────────────────┘
+         ↑ reads model from
+┌─────────────────────┐
+│   PVC Storage       │ ← Your .pt model file
+└─────────────────────┘
+
+┌─────────────────────┐
+│ Data Generator Pod  │ ← Another separate Python pod
+│  (Python script)    │ ← Built from services/data-generator/
+└─────────────────────┘
+
+1. Build Process each service gets own dockerfile
+``` bash
+# 1. Model Server (Python)
+cd services/model-server/
+docker build -t harbor.yourcompany.com/ml-model-server:latest .
+docker push harbor.yourcompany.com/ml-model-server:latest
+
+# 2. Data Generator (Python)
+cd services/data-generator/
+docker build -t harbor.yourcompany.com/data-generator:latest .
+docker push harbor.yourcompany.com/data-generator:latest
+
+# 3. Flink ML Job (Java) - same as your other jobs
+cd jobs/ml-inference-job/
+mvn clean package
+# Then add JAR to your Flink image or JAR server (your existing pattern)
+```
+2. in terraform
+``` bash
+# Model server uses Python image
+containers = [{
+  image = "harbor.yourcompany.com/ml-model-server:latest"
+}]
+
+# Data generator uses different Python image  
+containers = [{
+  image = "harbor.yourcompany.com/data-generator:latest"
+}]
+
+# Flink job uses your existing Flink image
+jarURI = "http://custom-jar-server:8443/ml-inference-job.jar"
+```
+
+
+### When creating script files, make sure you enable right permissions
+chmod +x build-python-services.sh
+
+
+What You Build
+
+Model Server: Contains model file in image
+
+
+1. Test Locally with venv
+``` bash
+cd /home/meklit/Documents/flink-terraform/services/model-server
+
+# Create venv
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run locally
+python main.py
+
+# Test in another terminal
+curl http://localhost:8000/health
+curl http://localhost:8000/test
+```
+
+seeing
+pod/ml-model-server-76bcbdd44b-4wdp8     0/1     Running   0          10s
+pod/ml-model-server-76bcbdd44b-bxj67     0/1     Running   0          10s
+
+so i ran this and go
+kubectl get svc
+
+ml-model-server        ClusterIP   172.30.72.247    <none>        8000/TCP            5m50s
+
+Great — since your service ml-model-server is of type ClusterIP, it means it's only accessible within the Kubernetes cluster. So if you're trying to curl or access /docs of your FastAPI app from outside the cluster (like your local machine), then yes, you’ll still need to port-forward or expose it differently.
+
+kubectl port-forward svc/ml-model-server 8000:8000
+
+testing
+{
+  "text": "having wifi issues throughout the house ran speed tests near modem and tv slow speeds on two point four network offered optimum wifi to get better wifi coverage thought out the house submitted thirty dollars mech voucher so cherly can try optimum day called in said she have to reconnect on and off her modem in order to connect her internet and this is going on since she switched her internet to internet fifty in date twentyone ft to internet tech support verify please note she does have an extender already in her house and she needs to reset her modem pretty every days may needs to check lines because of the bad experience added ten dollars credit for twelve months she is with sasktel since attempted to book optimum wifi on promotion twelve months for ten thirteen but booking calendar errored out will check back on account to secure booking",
+  "note_type": "TECHNICAL SUPPORT",
+  "can": "7110347"
+}
+
+
+Flink (Java) → HTTP → Model Server (Python) → Model → Response
+Options for ML inference in Flink:
+
+Model Server (what you're doing) ✅
+
+Python service loads model once
+Keeps model in memory
+Handles concurrent requests
+Flink makes HTTP calls
+
+
+Python UDF in Flink (complex)
+
+Embed Python in Flink using PyFlink
+Each task manager loads model copy
+High memory usage (model loaded per worker)
+Complex deployment
+
+
+Batch processing (not real-time)
+
+Save data to S3
+Run separate Python job
+No streaming
+
+Why You Need the Service
+The Service provides:
+
+Load balancing: Distributes requests across 2 replicas
+Health awareness: Only sends traffic to healthy pods
+Stable endpoint: DNS name doesn't change when pods restart
+Request queuing: Kubernetes handles connection pooling
+Failover: If one pod crashes, traffic goes to the other
+
+Without it, your Flink job would need to:
+
+Track individual pod IPs (which change)
+Implement its own retry logic
+Detect unhealthy pods
+Manually distribute load
+
+
+1. How to Cancel/Manage Jobs in Kubernetes
+View Running Jobs
+``` bash
+# Option A: Using Flink CLI (if you have access to JobManager pod)
+kubectl exec -it pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink -- /opt/flink/bin/flink list
+
+# Option B: Using Flink REST API
+kubectl port-forward service/data-team-flink-rest 8081:8081 -n sasktel-data-team-flink
+# Then in browser: http://localhost:8081/#/jobs/running
+# Or with curl:
+curl http://localhost:8081/jobs/overview
+
+# Option C: Check logs to find job ID
+kubectl logs pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink | grep "Job ID"
+```
+Cancel a Job
+``` bash
+# Method 1: Using Flink CLI (RECOMMENDED)
+kubectl exec -it pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink -- \
+  /opt/flink/bin/flink cancel <JOB_ID>
+
+# Method 2: Using REST API
+curl -X PATCH http://localhost:8081/jobs/<JOB_ID>?mode=cancel
+
+# Method 3: Cancel with savepoint (safe way)
+kubectl exec -it pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink -- \
+  /opt/flink/bin/flink cancel -s s3://bucket/savepoints <JOB_ID>
+
+# Method 4: If all else fails - restart JobManager (nuclear option)
+kubectl delete pod data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink
+```
+2. Quick Commands Cheat Sheet
+``` bash
+# List all running jobs
+flink list
+
+# Cancel job
+flink cancel <job-id>
+
+# Stop job with savepoint
+flink stop <job-id>
+
+# Cancel all jobs (use with caution!)
+flink list | grep -oP '(?<=: )[a-f0-9]{32}' | xargs -I {} flink cancel {}
+```
+
+### View TaskManager Logs (Where Your Job Output Goes)
+#### Real-time logs (follow mode) - MOST USEFUL
+kubectl logs -f pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink
+
+#### Last 100 lines
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink --tail=100
+
+#### Last 500 lines
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink --tail=500
+
+#### All logs (can be huge!)
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink
+
+#### Search for specific output
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | grep "Country Prefix"
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | grep -i "error\|exception"
+
+### View JobManager Logs (For Job Submission Info)
+#### Follow JobManager logs
+kubectl logs -f pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink
+
+#### Last 100 lines
+kubectl logs pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink --tail=100
+
+
+### Seeing Logs / Output of specific Job
+Filter Logs by Job Name/ID
+Method 1: Filter by Job Name (Easiest)
+```bash
+# Your job name from env.execute("SIP Call Counter - Simple (Fixed JSON)")
+kubectl logs -f pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | grep "SIP Call Counter"
+
+# Or filter by your specific output format
+kubectl logs -f pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | grep "Country Prefix:"
+Method 2: Filter by Job ID
+First, get your Job ID:
+bash# Option A: From Flink CLI
+kubectl exec -it pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink -- \
+  /opt/flink/bin/flink list
+
+# Output shows:
+# ------------------- Running/Restarting Jobs -------------------
+# 01.10.2024 10:30:00 : 3a7b9c2d4e5f6a7b8c9d0e1f2a3b4c5d : SIP Call Counter (RUNNING)
+# 01.10.2024 09:15:00 : 9f8e7d6c5b4a3210fedcba9876543210 : ML Inference Job (RUNNING)
+
+# Option B: From Flink UI
+# http://localhost:8081 after port-forward
+# Copy Job ID from URL or job list
+```
+
+Then filter logs by that Job ID:
+``` bash
+# Filter TaskManager logs by Job ID
+kubectl logs -f pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | \
+  grep "3a7b9c2d4e5f6a7b8c9d0e1f2a3b4c5d"
+Method 3: Use Flink's Logging Context (MDC)
+Flink adds job metadata to logs automatically. Check what's in your logs:
+```
+``` bash
+# View raw log format to see job identifiers
+kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink --tail=20
+
+# Look for patterns like:
+# [taskexecutor-3a7b9c2d] INFO  org.apache.flink.runtime.taskmanager.Task - ...
+#                ^^^^^^^^ This is part of Job ID
+```
+
+Filter by this:
+``` bash
+kubectl logs -f pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | \
+  grep "3a7b9c2d"
+
+```
+
+To View in Logs
+``` bash
+kubectl logs -f $(kubectl get pods -n sasktel-data-team-flink -l component=taskmanager -o name | head -1) -n sasktel-data-team-flink | grep -E "RAW-EVENTS|FILTERED-CALLS|WITH-PREFIX|WINDOWED-COUNTS|ALL-ANOMALIES|SIP-ANOMALY"
+```
