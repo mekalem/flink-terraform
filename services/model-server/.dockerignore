@@ -1,0 +1,26 @@
+# Environment files (NEVER include secrets)
+.env
+.env.*
+*.env
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Git files
+.git/
+.gitignore
+
+# Documentation
+*.md
+README.md
+
+# Local model folder (we get from S3 instead)
+models/
+
+# Exclude OTHER Python files that aren't the app
+main.py
+test.py

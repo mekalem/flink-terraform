@@ -118,35 +118,35 @@ echo "🚢 Pushing to Harbor Registry..."
 # Construct Harbor image name
 HARBOR_IMAGE_NAME="$HARBOUR_REGISTRY/$HARBOUR_PROJECT/$REPOSITORY:$TAG"
 
-# # Debug output
-# echo "🔍 Image tagging details:"
-# echo "  Source (local): $LOCAL_IMAGE_NAME"
-# echo "  Target (harbor): $HARBOR_IMAGE_NAME"
-# echo ""
+# Debug output
+echo "🔍 Image tagging details:"
+echo "  Source (local): $LOCAL_IMAGE_NAME"
+echo "  Target (harbor): $HARBOR_IMAGE_NAME"
+echo ""
 
-# echo "🏷️  Tagging image for Harbor..."
-# if docker tag "$LOCAL_IMAGE_NAME" "$HARBOR_IMAGE_NAME"; then
-#     echo "Successfully tagged image"
-# else
-#     echo "Failed to tag image"
-#     exit 1
-# fi
+echo "🏷️  Tagging image for Harbor..."
+if docker tag "$LOCAL_IMAGE_NAME" "$HARBOR_IMAGE_NAME"; then
+    echo "Successfully tagged image"
+else
+    echo "Failed to tag image"
+    exit 1
+fi
 
-# echo "📤 Pushing image to Harbor..."
-# if docker push "$HARBOR_IMAGE_NAME"; then
-#     echo "✅ Successfully pushed to Harbor: $HARBOR_IMAGE_NAME"
+echo "📤 Pushing image to Harbor..."
+if docker push "$HARBOR_IMAGE_NAME"; then
+    echo "✅ Successfully pushed to Harbor: $HARBOR_IMAGE_NAME"
 
-#     # # After successful push
-#     # echo "🔧 Setting Terraform variables..."
-#     # TF_VAR_NAME="TF_VAR_${JOB_NAME//-/_}_image"  # Convert hyphens to underscores
-#     # export "$TF_VAR_NAME"="$HARBOR_IMAGE_NAME"
-#     # echo "✅ Set $TF_VAR_NAME=$HARBOR_IMAGE_NAME"
+    # # After successful push
+    # echo "🔧 Setting Terraform variables..."
+    # TF_VAR_NAME="TF_VAR_${JOB_NAME//-/_}_image"  # Convert hyphens to underscores
+    # export "$TF_VAR_NAME"="$HARBOR_IMAGE_NAME"
+    # echo "✅ Set $TF_VAR_NAME=$HARBOR_IMAGE_NAME"
 
-# else
-#     echo " Failed to push to Harbor registry"
-#     echo "Make sure you're logged in: docker login $HARBOUR_REGISTRY"
-#     exit 1
-# fi
+else
+    echo " Failed to push to Harbor registry"
+    echo "Make sure you're logged in: docker login $HARBOUR_REGISTRY"
+    exit 1
+fi
 
 # set Terraform variable
 echo "🔧 Setting Terraform variables..."
@@ -171,3 +171,5 @@ else
     echo ""
     echo "Or use: ./deployment/scripts/build-and-deploy.sh $JOB_NAME $ENVIRONMENT true"
 fi
+
+

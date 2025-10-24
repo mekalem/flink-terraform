@@ -858,7 +858,7 @@ testing
 Flink (Java) → HTTP → Model Server (Python) → Model → Response
 Options for ML inference in Flink:
 
-Model Server (what you're doing) ✅
+Model Server (what you're doing) 
 
 Python service loads model once
 Keeps model in memory
@@ -964,6 +964,10 @@ kubectl logs pod/data-team-flink-taskmanager-1-2 -n sasktel-data-team-flink | gr
 #### Follow JobManager logs
 kubectl logs -f pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink
 
+Here's what each part does:
+
+kubectl logs -f - The -f flag means "follow" (like tail -f), which streams new logs as they appear
+
 #### Last 100 lines
 kubectl logs pod/data-team-flink-5c4c767f8d-9w8z8 -n sasktel-data-team-flink --tail=100
 
@@ -1021,3 +1025,166 @@ To View in Logs
 ``` bash
 kubectl logs -f $(kubectl get pods -n sasktel-data-team-flink -l component=taskmanager -o name | head -1) -n sasktel-data-team-flink | grep -E "RAW-EVENTS|FILTERED-CALLS|WITH-PREFIX|WINDOWED-COUNTS|ALL-ANOMALIES|SIP-ANOMALY"
 ```
+
+# S3 Bucket
+## How S3 Connection Works
+When you use rclone or boto3, here's what happens:
+
+Endpoint URL - tells the client WHERE the S3 service is (the server address)
+Bucket Name - tells it WHICH bucket to look in (like a folder name)
+Access Key + Secret Key - authenticates you (like username/password)
+Object Key - the file path inside the bucket (like models/distilroberta-base-ner-v3/final-model.pt)
+
+The client constructs the full URL internally as: {endpoint}/{bucket}/{object_key}
+
+## Debugging
+### NoSuchBucket (bucket name / path issue)
+
+```  bash
+Error listing bucket contents: An error occurred (NoSuchBucket) when calling the ListObjectsV2 operation: The specified bucket does not exist. are wse even connected right?
+```
+- means connected to s3 successfully but bucket name / path issue
+
+
+
+but if my remot emodel server code is still trying to access via os dotenv will that work still?YES, it will still work! Here's why:How Environment Variables Work in Containers:When Kubernetes injects environment variables (from Secrets or direct values), they become actual OS environment variables inside the container - exactly the same as if they came from a .env file.
+
+
+im waiting for docker push to finish, if im only doing  => [2/6] WORKDIR /app                                                                                                       1.2s
+ => [3/6] RUN apt-get update && apt-get install -y     gcc     g++     curl     && rm -rf /var/lib/apt/lists/*              27.0s
+ => [4/6] COPY requirements.txt .                                                                                            0.1s
+ => [5/6] RUN pip install --no-cache-dir -r requirements.txt                                                               804.3s
+ => [6/6] COPY remote-model-server.py .  why is it taking 10+ min, still not done over 7gb?
+
+ The issue is Flair - it's HUGE and pulls in PyTorch and transformers as dependencies!
+
+
+## if things are laggy
+- bypass routes created and tested directly with service, do the get all command for name
+
+Step 1: Check if Pods are Running
+``` bash
+kubectl get pods -n sasktel-data-team-flink -l app=ml-model-server
+
+# Check status details
+kubectl describe pod -l app=ml-model-server -n sasktel-data-team-flink
+
+# Run model server from inside pod
+kubectl exec -it ml-model-server-6dd957c455-98t82 -n sasktel-data-team-flink -- bash -c   'time curl http://ml-model-server:8000/health'
+
+Result should be
+{"status":"healthy"}
+real	0m0.034s
+user	0m0.007s
+sys	0m0.013s
+
+``` 
+
+## possible error
+`xpecting property name enclosed in double quotes`, means have to alternate single nad double quotes
+or escape them right 
+
+``` bash
+
+kubectl exec -it ml-model-server-6dd957c455-vzcgr -n sasktel-data-team-flink --   curl -X POST http://ml-model-server:8000/predict   -H 'Content-Type: application/json'   -d '{ "text": "having wifi issues throughout the house ran speed tests near modem and tv slow speeds on two point four network offered optimum wifi to get better wifi coverage thought out the house submitted thirty dollars mech voucher so cherly can try optimum day called in said she have to reconnect on and off her modem in order to connect her internet and this is going on since she switched her internet to internet fifty in date twentyone ft to internet tech support verify please note she does have an extender already in her house and she needs to reset her modem pretty every days may needs to check lines because of the bad experience added ten dollars credit for twelve months she is with sasktel since attempted to book optimum wifi on promotion twelve months for ten thirteen but booking calendar errored out will check back on account to secure booking",
+  "note_type": "TECHNICAL SUPPORT",
+  "can": "7110347"}'
+
+
+kubectl exec -it <pod-name> -n sasktel-data-team-flink -- \
+  curl -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"John called","note_type":"TEST","can":"123"}'
+
+
+
+kubectl exec -it ml-model-server-6dd957c455-vzcgr -n sasktel-data-team-flink time curl -X POST http://ml-model-server:8000/predict   -H 'Content-Type: application/json'   -d '{"text":"John called","note_type":"TEST","can":"123"}'
+
+```
+
+
+ocal laptop - 130ms
+inside pod - 5480ms -> 41x slower 
+via route - 13224ms -> 100x slower
+
+means network is not the problem, route adds 8 sec on top of exisiting slow pod
+
+1. CPU Throttling / Resource Starvation ⚠️ (MOST LIKELY)
+Check actual CPU usage:
+
+``` bash
+# Check if pod is being throttled
+kubectl top pod <pod-name> -n sasktel-data-team-flink
+
+# Check CPU limits
+kubectl describe pod <pod-name> -n sasktel-data-team-flink | grep -A 5 "Limits"
+```
+
+**Your current limits:**
+```
+cpu: 2 cores (limit)
+cpu: 1 core (request)
+```
+
+results   Limits:
+      cpu:     2
+      memory:  4Gi
+    Requests:
+      cpu:      1
+      memory:   2Gi
+
+NAME                               CPU(cores)   MEMORY(bytes)   
+ml-model-server-6dd957c455-vzcgr   3m           975Mi 
+
+- resource starvation is not the issue, its actually  millicores out of 2000 (0.15% CPU usage).
+2. Check if pytorch is running in single thread mode,
+results are 
+``` bash
+Number of threads: 40
+Number of interop threads: 40
+
+```
+
+## Multiple Jars
+if there multiple jobs in one project folder, can either have separate Jar per job,
+adjust pom.xml to have multiple executions of the shade plugin
+or have ## Option 2: Multi-Module Maven Project
+If you want cleaner separation, restructure as a multi-module project:
+``` bash
+nlp-finance-credits/
+├── pom.xml (parent)
+├── common/
+│   └── pom.xml
+├── nlp-job/
+│   └── pom.xml
+├── ml-inference-job/
+│   └── pom.xml
+└── producer-job/
+    └── pom.xml
+```
+# Common Issues
+/nlp-finance-credits/src/main/java/com/company/jobs/NlpFinanceCreditsJob.java:[42,41] cannot find symbol
+
+Here are the ways to view logs for failed/canceled Flink jobs:
+1. Flink Web UI (Easiest)
+bash# Access the UI (default port)
+http://localhost:8081
+
+# Navigate to: Completed Jobs → Click on your job → Exceptions tab
+
+
+You need to enable the cancel button in Flink's configuration! Here's how:
+Quick Fix: Add to Flink Configuration
+The setting you need is:
+``` bash 
+web.cancel.enable: true
+```
+
+Method 1: Terraform/Kubernetes ConfigMap (Recommended)
+Method 2: Environment Variables in Terraform
+I chose method two
+
+
+#### SIP Kafka Processing Time Problem: 
+System.currentTimeMillis() returns UTC milliseconds, 
+and SimpleDateFormat uses the server's timezone (which might not be CST).

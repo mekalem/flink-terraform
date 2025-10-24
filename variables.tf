@@ -61,3 +61,38 @@ variable "image_tag" {
   type        = string
   default     = "latest"
 }
+
+
+# Add S3 variables
+variable "s3_bucket_name" {
+  description = "S3 bucket name for model storage"
+  type        = string
+}
+
+variable "s3_model_key" {
+  description = "S3 object key for the model file"
+  type        = string
+}
+
+variable "s3_endpoint_url" {
+  description = "S3 endpoint URL"
+  type        = string
+}
+
+variable "s3_access_key_id" {
+  description = "S3 access key ID"
+  type        = string
+  sensitive   = true
+}
+
+variable "s3_secret_access_key" {
+  description = "S3 secret access key"
+  type        = string
+  sensitive   = true
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
